@@ -440,7 +440,7 @@ else:
             unsafe_allow_html=True,
         )
         st.markdown('<div class="nw-qr-head">📱 Scan & share</div>', unsafe_allow_html=True)
-        _, qr_col, _ = st.columns([1, 2.4, 1])
+        _, qr_col, _ = st.columns([0.6, 3, 0.6])
         with qr_col:
             st.image(make_qr(student_url), use_container_width=True)
 
@@ -491,4 +491,3 @@ else:
 
     show_live_wall()
     st.markdown('<p class="nw-footer">🧬 NanoWall · Every big idea starts small ✨</p>', unsafe_allow_html=True)
-
