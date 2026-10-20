@@ -1,8 +1,10 @@
 """NanoWall — live feedback for an English lesson about nanotechnology."""
 
+import csv
+import hmac
 import html
 import sqlite3
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 import qrcode
@@ -44,11 +46,34 @@ def save_feedback(message):
         )
 
 
-def load_feedback():
+def load_feedback(limit=60):
     with database() as connection:
+        if limit is None:
+            return connection.execute(
+                "SELECT id, message FROM feedback ORDER BY id DESC"
+            ).fetchall()
         return connection.execute(
-            "SELECT id, message FROM feedback ORDER BY id DESC LIMIT 60"
+            "SELECT id, message FROM feedback ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
+
+
+def delete_feedback(message_id):
+    with database() as connection:
+        connection.execute("DELETE FROM feedback WHERE id = ?", (message_id,))
+
+
+def clear_feedback():
+    with database() as connection:
+        connection.execute("DELETE FROM feedback")
+
+
+def export_feedback_csv(messages):
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Feedback (English)"])
+    for message_id, message in messages:
+        writer.writerow([message_id, message])
+    return output.getvalue().encode("utf-8-sig")
 
 
 def make_qr(url):
@@ -143,6 +168,7 @@ prepare_database()
 base_url = st.context.url.rstrip("/")
 student_url = f"{base_url}/?view=student" if base_url.endswith(".app") else f"{base_url}?view=student"
 wall_url = f"{base_url}/?view=wall" if base_url.endswith(".app") else f"{base_url}?view=wall"
+admin_url = f"{base_url}/?view=admin" if base_url.endswith(".app") else f"{base_url}?view=admin"
 view = st.query_params.get("view", "wall")
 
 if view == "student":
@@ -174,6 +200,75 @@ if view == "student":
                 st.warning("Please write a short message first.")
         st.markdown('<p class="small-note">No name needed · English practice · Your message is shown on the class screen.</p>', unsafe_allow_html=True)
         st.link_button("↗ View the feedback wall", wall_url, use_container_width=True)
+elif view == "admin":
+    st.markdown('<span class="hero-tag">🧬 NANOWALL · TEACHER</span>', unsafe_allow_html=True)
+    st.title("Панель преподавателя")
+    st.link_button("← Вернуться к экрану отзывов", wall_url)
+
+    # A password must be set in Streamlit Cloud → App settings → Secrets.
+    # Never store this password in the public GitHub repository.
+    try:
+        admin_password = st.secrets.get("ADMIN_PASSWORD")
+    except Exception:
+        admin_password = None
+
+    if not admin_password:
+        st.error("Сначала задай ADMIN_PASSWORD в настройках Secrets на Streamlit Cloud.")
+        st.code('ADMIN_PASSWORD = "сюда_свой_надёжный_пароль"', language="toml")
+        st.stop()
+
+    if not st.session_state.get("admin_authenticated", False):
+        with st.form("admin_login"):
+            password_input = st.text_input("Пароль преподавателя", type="password")
+            login_clicked = st.form_submit_button("Войти", type="primary")
+        if login_clicked:
+            if hmac.compare_digest(password_input, str(admin_password)):
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Неверный пароль")
+        st.stop()
+
+    if st.button("🔒 Выйти"):
+        st.session_state["admin_authenticated"] = False
+        st.rerun()
+
+    messages = load_feedback(limit=None)
+    st.metric("Всего отзывов", len(messages))
+
+    if messages:
+        st.download_button(
+            "⬇️ Скачать все отзывы (CSV)",
+            data=export_feedback_csv(messages),
+            file_name="nanowall_feedback.csv",
+            mime="text/csv",
+        )
+
+        with st.expander("🗑️ Очистить все отзывы", expanded=False):
+            st.warning("Это удалит все отзывы без возможности восстановления. При необходимости сначала скачай CSV.")
+            with st.form("confirm_clear_form"):
+                confirmed = st.checkbox("Подтверждаю удаление всех отзывов")
+                clear_clicked = st.form_submit_button("Удалить все отзывы", type="primary")
+                if clear_clicked:
+                    if confirmed:
+                        clear_feedback()
+                        st.rerun()
+                    else:
+                        st.error("Сначала отметь подтверждение")
+
+        st.subheader("Отзывы студентов")
+        for message_id, message in messages:
+            with st.container(border=True):
+                content_col, button_col = st.columns([5, 1], vertical_alignment="center")
+                with content_col:
+                    st.caption(f"Отзыв #{message_id}")
+                    st.write(message)
+                with button_col:
+                    if st.button("Удалить", key=f"delete_{message_id}"):
+                        delete_feedback(message_id)
+                        st.rerun()
+    else:
+        st.info("Пока нет отзывов. Новые сообщения появятся здесь.")
 else:
     left, right = st.columns([4.7, 1.2], gap="large", vertical_alignment="center")
     with left:
@@ -214,3 +309,4 @@ else:
             st.markdown(f'<div class="feedback-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
 
     show_live_wall()
+
