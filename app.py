@@ -1,31 +1,45 @@
-"""NanoWall — live feedback for an English lesson about nanotechnology."""
+"""NanoWall v2 — live, emoji-powered class feedback for a nanotechnology English lesson.
+
+Deployment: Streamlit Community Cloud. Only the teacher's admin view requires
+ADMIN_PASSWORD in Streamlit Cloud Secrets; never place it in a public repository.
+"""
 
 import csv
 import hmac
 import html
 import sqlite3
+from contextlib import contextmanager
 from io import BytesIO, StringIO
 from pathlib import Path
 
 import qrcode
 import streamlit as st
 
-
 st.set_page_config(
-    page_title="NanoWall · English Lesson",
+    page_title="NanoWall ✨ · Nanotechnology",
     page_icon="🧬",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
 DB_PATH = Path(__file__).with_name("feedback.db")
+REACTIONS = {
+    "💡": "I learned something",
+    "🤯": "Mind-blowing!",
+    "🚀": "I'm inspired",
+    "🧬": "I want to know more",
+}
 
 
+@contextmanager
 def database():
-    # Separate connection per operation so multiple students can submit at once.
-    connection = sqlite3.connect(DB_PATH, timeout=15)
-    connection.execute("PRAGMA busy_timeout=15000")
-    return connection
+    connection = sqlite3.connect(DB_PATH, timeout=20)
+    connection.execute("PRAGMA busy_timeout=20000")
+    try:
+        yield connection
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def prepare_database():
@@ -37,12 +51,22 @@ def prepare_database():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"""
         )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(feedback)")}
+        if "reaction" not in columns:
+            # Works with the previous NanoWall database as well.
+            connection.execute("ALTER TABLE feedback ADD COLUMN reaction TEXT NOT NULL DEFAULT '💬'")
+        if "student_name" not in columns:
+            # Older anonymous feedback remains visible after upgrading.
+            connection.execute(
+                "ALTER TABLE feedback ADD COLUMN student_name TEXT NOT NULL DEFAULT 'Anonymous student'"
+            )
 
 
-def save_feedback(message):
+def save_feedback(student_name, message, reaction):
     with database() as connection:
         connection.execute(
-            "INSERT INTO feedback (message) VALUES (?)", (message,)
+            "INSERT INTO feedback (student_name, message, reaction) VALUES (?, ?, ?)",
+            (student_name, message, reaction if reaction in REACTIONS else "💡"),
         )
 
 
@@ -50,11 +74,17 @@ def load_feedback(limit=60):
     with database() as connection:
         if limit is None:
             return connection.execute(
-                "SELECT id, message FROM feedback ORDER BY id DESC"
+                "SELECT id, student_name, message, reaction FROM feedback ORDER BY id DESC"
             ).fetchall()
         return connection.execute(
-            "SELECT id, message FROM feedback ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT id, student_name, message, reaction FROM feedback ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
+
+
+def feedback_count():
+    with database() as connection:
+        return connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
 
 
 def delete_feedback(message_id):
@@ -67,12 +97,18 @@ def clear_feedback():
         connection.execute("DELETE FROM feedback")
 
 
+def csv_safe(value):
+    # Prevent spreadsheet programs from treating student text as formulas.
+    value = str(value)
+    return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
+
+
 def export_feedback_csv(messages):
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(["ID", "Feedback (English)"])
-    for message_id, message in messages:
-        writer.writerow([message_id, message])
+    writer.writerow(["ID", "Student name", "Feedback (English)", "Reaction"])
+    for message_id, student_name, message, reaction in messages:
+        writer.writerow([message_id, csv_safe(student_name), csv_safe(message), reaction])
     return output.getvalue().encode("utf-8-sig")
 
 
@@ -80,7 +116,7 @@ def make_qr(url):
     code = qrcode.QRCode(box_size=8, border=2)
     code.add_data(url)
     code.make(fit=True)
-    img = code.make_image(fill_color="#101932", back_color="white")
+    img = code.make_image(fill_color="#152343", back_color="white")
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -89,138 +125,243 @@ def make_qr(url):
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 :root { color-scheme: dark; }
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .stApp {
+    color: #F4F7FF;
     background:
-        radial-gradient(ellipse 650px 460px at 2% 2%, rgba(64, 209, 205, .12), transparent 72%),
-        radial-gradient(ellipse 680px 500px at 100% 9%, rgba(147, 107, 255, .16), transparent 70%),
-        radial-gradient(ellipse 520px 380px at 52% 96%, rgba(54, 109, 241, .10), transparent 76%),
-        #0A1022;
+      radial-gradient(ellipse 53% 35% at 6% 2%, rgba(35,216,198,.17), transparent 72%),
+      radial-gradient(ellipse 42% 32% at 100% 12%, rgba(163,103,255,.18), transparent 70%),
+      radial-gradient(ellipse 50% 30% at 50% 100%, rgba(40,103,225,.12), transparent 75%),
+      #090E21;
 }
-.block-container { max-width: 1260px; padding-top: 2rem; padding-bottom: 4rem; }
-#MainMenu, footer { visibility: hidden; }
-[data-testid="stHeader"] { background: transparent; }
-[data-testid="stMarkdownContainer"] p { line-height: 1.5; }
-.hero-tag { display: inline-block; padding: 7px 13px; border: 1px solid rgba(96, 239, 219, .35);
-    border-radius: 999px; color: #70EDD7; background: rgba(35, 206, 190, .07);
-    letter-spacing: .14em; font-size: .72rem; font-weight: 800; text-transform: uppercase; }
-.hero-title { font-family: 'Space Grotesk', sans-serif; font-size: clamp(2.7rem, 6vw, 5.3rem);
-    font-weight: 700; line-height: 1.06; letter-spacing: -.055em; margin: 16px 0 12px;
-    color: #F6F8FF; }
-.hero-title span { background: linear-gradient(110deg,#77FBE0 15%,#A78BFA 88%);
-    -webkit-background-clip: text; background-clip: text; color: transparent; }
-.hero-sub { color: #ABB6D4; font-size: 1.15rem; max-width: 660px; margin: 0 0 18px; }
-.dividerline { height: 1px; background: linear-gradient(90deg,rgba(115,249,222,.5),rgba(150,118,255,.25),transparent);
-    margin: 26px 0 24px; }
-.wall-top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
-    justify-content: space-between; margin-bottom: 20px; }
-.wall-title { font-family: 'Space Grotesk', sans-serif; font-size: 1.45rem; font-weight: 700;
-    color: #F6F8FF; }
-.live-label { display: inline-flex; align-items: center; gap: 8px; color: #78F5D9;
-    background: rgba(112,245,217,.08); padding: 7px 12px; border-radius: 999px;
-    border: 1px solid rgba(112,245,217,.20); font-size: .80rem; }
-.live-dot { height: 7px; width: 7px; display: inline-block; background: #78F5D9;
-    border-radius: 50%; box-shadow: 0 0 11px #78F5D9; }
-.feedback-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(265px,1fr)); gap: 17px; }
-.feedback-card { min-height: 150px; padding: 22px 22px 18px; border-radius: 19px;
-    border: 1px solid rgba(154,178,236,.19);
-    background: linear-gradient(145deg,rgba(35,46,85,.88),rgba(20,31,57,.87));
-    box-shadow: 0 12px 35px rgba(1,4,16,.16); }
-.feedback-card:nth-child(3n+2) { border-top-color: rgba(172,137,255,.60); }
-.feedback-card:nth-child(3n+3) { border-top-color: rgba(106,235,224,.60); }
-.feedback-card-head { display: flex; justify-content: space-between; align-items: center;
-    color: #9FACCB; text-transform: uppercase; letter-spacing: .1em;
-    font-size: .69rem; font-weight: 800; margin-bottom: 20px; }
-.feedback-card-head b { font-size: 1.15rem; color: #86F7DD; }
-.feedback-text { font-family: 'Space Grotesk', sans-serif; color: #F6F7FF;
-    font-size: 1.10rem; font-weight: 500; line-height: 1.55; overflow-wrap: anywhere;
-    white-space: pre-wrap; }
-.empty-wall { border: 1px dashed rgba(150,173,225,.27); border-radius: 24px;
-    padding: 60px 24px; text-align: center; color: #B6C2DF;
-    background: rgba(27,38,72,.30); }
-.empty-wall strong { font-family: 'Space Grotesk', sans-serif; color: #F6F8FF;
-    font-size: 1.45rem; display: block; margin-bottom: 8px; }
-.form-heading { font-family: 'Space Grotesk', sans-serif; font-size: clamp(2rem, 5vw, 3.6rem);
-    font-weight: 700; letter-spacing: -.04em; line-height: 1.15; color: #F7F9FF; margin: 20px 0 10px; }
-.student-sub { color: #B5C1DF; font-size: 1.08rem; margin-bottom: 28px; }
-.prompt-box { padding: 18px 20px; background: rgba(108,234,213,.08); color: #C6F4EB;
-    border: 1px solid rgba(108,234,213,.23); border-radius: 15px; margin-bottom: 18px; }
-.prompt-box span { font-size: .82rem; letter-spacing: .08em; text-transform: uppercase; color: #72EFD9; }
-.prompt-box strong { color: #F5F9FF; display: block; font-size: 1.18rem; margin: 7px 0; }
-.small-note { font-size: .90rem; color: #A4B3D0; }
-[data-testid="stTextArea"] textarea { background: #182441; border: 1px solid #3A4C71;
-    color: #F4F7FF; border-radius: 14px; font-size: 1.05rem; }
-.stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button {
-    background: linear-gradient(110deg,#79F9DE,#92B8FF); border: none; color: #0B1830;
-    font-weight: 800; border-radius: 13px; padding: 10px 24px;
+/* A faint molecular-dot pattern instead of heavy background images. */
+.stApp::before {
+    content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+    background-image:radial-gradient(circle,rgba(160,183,250,.24) 1px,transparent 1px);
+    background-size:34px 34px; opacity:.22;
+    -webkit-mask-image:linear-gradient(to bottom,black,transparent 95%);
+    mask-image:linear-gradient(to bottom,black,transparent 95%);
 }
-[data-testid="stImage"] img { border: 7px solid white; border-radius: 13px; }
-@media (max-width: 650px) { .block-container { padding: 1.2rem .9rem 3rem; }
-.hero-title { font-size: 2.9rem; } .feedback-grid { grid-template-columns: 1fr; } }
+.block-container { position:relative; z-index:1; max-width:1240px; padding-top:1.5rem; padding-bottom:4rem; }
+[data-testid="stHeader"] { background:transparent; }
+#MainMenu, footer { visibility:hidden; }
+[data-testid="stMarkdownContainer"] p { line-height:1.6; }
+h1, h2, h3 { font-family:'Space Grotesk',sans-serif; }
+.nw-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px;
+    padding:10px 0 30px; }
+.nw-brand { display:flex; gap:10px; align-items:center; color:#F6F8FF; font-weight:800;
+    font-family:'Space Grotesk',sans-serif; font-size:1.08rem; letter-spacing:-.03em; }
+.nw-brand-icon { display:inline-flex; width:36px; height:36px; align-items:center; justify-content:center;
+    border-radius:12px; border:1px solid rgba(114,245,223,.3); background:rgba(104,236,219,.10); font-size:1.3rem; }
+.nw-pill { border-radius:999px; padding:7px 13px; color:#BDD4EF; background:rgba(151,165,217,.08);
+    border:1px solid rgba(150,171,228,.19); font-size:.78rem; font-weight:750; letter-spacing:.03em; }
+.nw-eyebrow { display:inline-flex; align-items:center; gap:7px; border-radius:999px;
+    padding:9px 13px; background:rgba(85,230,209,.09); color:#75F5DD; border:1px solid rgba(117,245,221,.23);
+    text-transform:uppercase; letter-spacing:.13em; font-weight:850; font-size:.72rem; }
+.nw-title { font-family:'Space Grotesk',sans-serif; font-size:clamp(3rem,6.7vw,6.2rem);
+    line-height:1.01; letter-spacing:-.065em; font-weight:700; color:#F7F8FF; margin:22px 0 21px; }
+.nw-title .gradient { background:linear-gradient(98deg,#74F9DB 12%,#9ECAFF 57%,#D3A2FF);
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+.nw-desc { color:#B2C1DF; font-size:clamp(1.04rem,1.4vw,1.2rem); line-height:1.65;
+    max-width:630px; margin-bottom:21px; }
+.nw-sparks { display:flex; gap:10px; flex-wrap:wrap; margin-top:15px; }
+.nw-spark { display:inline-flex; align-items:center; gap:7px; border-radius:999px; padding:7px 12px;
+    font-weight:600; color:#C4D2EA; font-size:.83rem; border:1px solid rgba(130,157,228,.2);
+    background:rgba(23,36,68,.62); }
+/* Orbit illustration drawn entirely with CSS. */
+.nano-scene { margin:12px auto 25px; max-width:280px; height:235px; position:relative; }
+.nano-glow { position:absolute; inset:36px; border-radius:50%; background:radial-gradient(circle,rgba(111,248,216,.24),rgba(111,119,238,.05) 65%,transparent 70%);
+    filter:blur(15px); }
+.nano-ring { position:absolute; width:185px; height:185px; left:50%; top:50%; margin:-92.5px 0 0 -92.5px;
+    border:2px solid rgba(123,231,228,.52); border-radius:50%; transform:rotate(30deg) scaleY(.55);
+    box-shadow:0 0 18px rgba(88,207,216,.08); }
+.nano-ring.r2 { transform:rotate(90deg) scaleY(.55); border-color:rgba(171,137,253,.52); }
+.nano-ring.r3 { transform:rotate(150deg) scaleY(.55); border-color:rgba(126,190,251,.45); }
+.nano-core { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:92px; height:92px; display:flex; align-items:center; justify-content:center; font-size:2.95rem;
+    border-radius:30px; background:linear-gradient(145deg,rgba(91,233,209,.23),rgba(141,110,255,.3));
+    border:1px solid rgba(153,244,226,.45); box-shadow:0 0 45px rgba(87,237,206,.16);
+    animation:floatCore 5s ease-in-out infinite; }
+.nano-dot { position:absolute; width:14px; height:14px; border-radius:50%; z-index:3;
+    background:#7DF9DA; box-shadow:0 0 16px rgba(125,249,218,.85); }
+.nano-dot.d1 { top:35px; left:81px; animation:orbitFloat 4s ease-in-out infinite; }
+.nano-dot.d2 { bottom:22px; right:67px; background:#B6A0FF; box-shadow:0 0 18px rgba(182,160,255,.8); animation:orbitFloat 5s ease-in-out infinite reverse; }
+.nano-dot.d3 { top:91px; right:29px; width:10px; height:10px; background:#8BD2FF; box-shadow:0 0 14px rgba(139,210,255,.8); }
+@keyframes floatCore { 0%,100%{transform:translate(-50%,-50%)} 50%{transform:translate(-50%,-58%)} }
+@keyframes orbitFloat { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-9px)} }
+.nw-orbit-caption { text-align:center; color:#A4B7D8; font-size:.84rem; margin-top:-8px; letter-spacing:.05em; }
+.nw-qr-head { text-align:center; font-size:.85rem; font-weight:800; color:#75F4DA;
+    margin-bottom:8px; text-transform:uppercase; letter-spacing:.12em; }
+.nw-divider { margin:26px 0 24px; height:1px;
+    background:linear-gradient(90deg,rgba(118,252,224,.45),rgba(189,154,255,.33),transparent); }
+.nw-section-title { font-family:'Space Grotesk',sans-serif; color:#F4F8FF;
+    font-size:clamp(1.45rem,2.7vw,2rem); line-height:1.2; letter-spacing:-.03em; font-weight:700; }
+.nw-section-sub { color:#99AACD; font-size:.94rem; margin-top:5px; }
+.nw-live { display:inline-flex; align-items:center; gap:8px; padding:8px 13px;
+    border:1px solid rgba(104,240,198,.30); background:rgba(59,195,156,.11); color:#8CFADC;
+    font-size:.74rem; font-weight:800; letter-spacing:.09em; border-radius:999px; }
+.nw-live-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#79FFD5;
+    box-shadow:0 0 10px #79FFD5; animation:blink 2s ease-in-out infinite; }
+@keyframes blink {50%{opacity:.35} }
+.nw-wall-meta {display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:20px;}
+.nw-stats { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin:13px 0 22px; }
+.nw-stat { background:rgba(22,34,61,.7); border:1px solid rgba(136,163,231,.16);
+    border-radius:10px; padding:7px 11px; color:#C3CEE7; font-size:.88rem; }
+.nw-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(255px,1fr)); gap:16px; }
+.nw-card { padding:22px 21px; border-radius:19px; background:linear-gradient(145deg,rgba(31,45,77,.96),rgba(20,29,55,.92));
+    border:1px solid rgba(139,171,230,.22); box-shadow:0 14px 38px rgba(3,6,17,.15);
+    min-height:165px; transition:transform .22s ease,border-color .22s ease,box-shadow .22s ease; }
+.nw-card:hover { transform:translateY(-4px); border-color:rgba(127,244,217,.55); box-shadow:0 15px 45px rgba(46,195,182,.12); }
+.nw-card:nth-child(4n+2) { border-top:2px solid #BB9EFF; }
+.nw-card:nth-child(4n+3) { border-top:2px solid #76DDFF; }
+.nw-card:nth-child(4n+4) { border-top:2px solid #FFC78D; }
+.nw-card:nth-child(4n+1) { border-top:2px solid #77F5DA; }
+.nw-card-top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:18px; }
+.nw-student { display:inline-flex; align-items:center; min-width:0; gap:9px; color:#F2F8FF;
+    font-weight:800; font-size:.96rem; overflow-wrap:anywhere; }
+.nw-student-avatar {flex:none; width:35px; height:35px; display:inline-flex; align-items:center;
+    justify-content:center; border-radius:11px; background:linear-gradient(130deg,#70EFD4,#A997FF);
+    color:#0E1732; font-size:1.02rem; font-weight:900; }
+.nw-reaction { display:flex; align-items:center; justify-content:center; width:42px; height:42px;
+    border-radius:14px; font-size:1.45rem; background:rgba(105,120,206,.13); border:1px solid rgba(138,154,229,.16); }
+.nw-message { color:#F7F8FF; font-family:'Space Grotesk',sans-serif; font-size:1.12rem;
+    line-height:1.56; font-weight:500; overflow-wrap:anywhere; white-space:pre-wrap; }
+.nw-empty { border:1px dashed rgba(135,170,238,.33); background:rgba(30,45,80,.38);
+    border-radius:22px; text-align:center; padding:50px 18px; color:#B4C2DF; }
+.nw-empty-emoji {font-size:3.3rem; display:block; margin-bottom:12px; animation:floatCore 5s ease-in-out infinite;}
+.nw-empty b { display:block; color:#F7F8FF; font-family:'Space Grotesk',sans-serif; font-size:1.5rem; margin-bottom:8px; }
+.nw-student-title { font-family:'Space Grotesk',sans-serif; font-size:clamp(2.7rem,6vw,4.35rem);
+    line-height:1.05; letter-spacing:-.055em; font-weight:700; color:#F8F9FF; margin:20px 0 14px; }
+.nw-student-title span { background:linear-gradient(100deg,#79F7D9,#B7A0FE);
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+.nw-card-prompt { border-radius:18px; padding:18px 22px; margin:21px 0;
+    border:1px solid rgba(116,247,215,.25); background:linear-gradient(140deg,rgba(36,103,112,.22),rgba(86,63,158,.13)); }
+.nw-card-prompt small { color:#75F3DA; letter-spacing:.12em; text-transform:uppercase; font-size:.7rem; font-weight:900; }
+.nw-card-prompt strong { display:block; font-size:1.14rem; color:#F4FBFF; margin:7px 0 9px; }
+.nw-card-prompt p { color:#B6CCE0; margin:0; font-size:.92rem; }
+.nw-input-caption { color:#A1B4D6; font-size:.88rem; margin-bottom:13px; }
+.nw-footer { text-align:center; font-size:.8rem; color:#7F93B5; margin-top:40px; }
+[data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea { background:#141F3A; border:1px solid #3B5077;
+    border-radius:16px; color:#F5FAFF; font-size:1.04rem; }
+[data-testid="stTextInput"] input:focus, [data-testid="stTextArea"] textarea:focus { border-color:#7EF7DE; box-shadow:0 0 0 1px rgba(126,247,222,.24); }
+[data-testid="stRadio"] label { color:#E7EDFF; }
+[data-testid="stRadio"] div[role="radiogroup"] { gap:9px; flex-wrap:wrap; }
+[data-testid="stFormSubmitButton"] button[kind="primary"],
+.stButton button[kind="primary"] { background:linear-gradient(103deg,#76F6D9,#A2C6FF); color:#10223E;
+    border:0; border-radius:13px; font-weight:850; }
+[data-testid="stLinkButton"] a { border-radius:13px; border-color:rgba(142,196,235,.3); }
+[data-testid="stImage"] img { border-radius:15px; border:7px solid #fff; }
+@media(max-width:768px) {
+    .block-container {padding:1rem .95rem 3rem;}
+    .nw-title {font-size:3.25rem;}
+    .nw-header {padding-bottom:12px;}
+    .nw-grid {grid-template-columns:1fr;}
+    .nano-scene {height:165px;transform:scale(.77);margin:-4px auto 0;}
+    .nw-orbit-caption {margin-top:0;}
+}
+@media(prefers-reduced-motion:reduce) { .nw-live-dot,.nano-core,.nano-dot,.nw-empty-emoji {animation:none!important;} .nw-card {transition:none;} }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
+
+def header(right_label="🌟 ENGLISH • NANOTECHNOLOGY"):
+    st.markdown(
+        '<div class="nw-header"><div class="nw-brand"><span class="nw-brand-icon">🧬</span>'
+        '<span>NanoWall <span style="color:#77F8DD">✦</span></span></div>'
+        f'<span class="nw-pill">{html.escape(right_label)}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def url_with_view(base_url, view):
+    # st.context.url is the public app URL on Streamlit Cloud.
+    return f"{base_url.rstrip('/')}/?view={view}"
+
+
 prepare_database()
-base_url = st.context.url.rstrip("/")
-student_url = f"{base_url}/?view=student" if base_url.endswith(".app") else f"{base_url}?view=student"
-wall_url = f"{base_url}/?view=wall" if base_url.endswith(".app") else f"{base_url}?view=wall"
-admin_url = f"{base_url}/?view=admin" if base_url.endswith(".app") else f"{base_url}?view=admin"
+base_url = st.context.url
+wall_url = url_with_view(base_url, "wall")
+student_url = url_with_view(base_url, "student")
 view = st.query_params.get("view", "wall")
 
 if view == "student":
-    _, center, _ = st.columns([1, 2.4, 1])
+    header("📱 STUDENT SPACE")
+    _, center, _ = st.columns([1, 2.7, 1])
     with center:
-        st.markdown('<span class="hero-tag">🧬 ENGLISH · NANOTECHNOLOGY</span>', unsafe_allow_html=True)
-        st.markdown('<div class="form-heading">Your voice.<br>Our <span style="color:#7CF3DA">future.</span></div>', unsafe_allow_html=True)
-        st.markdown('<div class="student-sub">Share one thought about today’s nanotechnology lesson.</div>', unsafe_allow_html=True)
+        st.markdown('<span class="nw-eyebrow">✨ Your name. Your ideas.</span>', unsafe_allow_html=True)
+        st.markdown('<div class="nw-student-title">Your voice.<br><span>Our future. 🚀</span></div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="prompt-box"><span>💬 Your reflection</span>'
-            '<strong>What did you find interesting or learn today?</strong>'
-            'Start with: “Today I learned...” or “I was surprised that...”</div>',
+            '<div class="nw-desc">Take 20 seconds to tell us what you discovered '
+            'about the tiny world of nanotechnology. In English, of course! 🇬🇧</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="nw-card-prompt"><small>💭 Today\'s reflection</small>'
+            '<strong>What surprised you or what did you learn today?</strong>'
+            '<p>💡 “Today I learned that...”<br>🔬 “I was surprised that...”<br>'
+            '🌍 “Nanotechnology could change...”</p></div>',
             unsafe_allow_html=True,
         )
         with st.form("send_feedback", clear_on_submit=True):
+            student_name = st.text_input(
+                "👩‍🎓 Your name / Имя студента",
+                placeholder="e.g. Amina / Амина",
+                max_chars=40,
+            )
+            reaction = st.radio(
+                "Choose an emoji for your thoughts ✨",
+                options=list(REACTIONS),
+                format_func=lambda emoji: f"{emoji} {REACTIONS[emoji]}",
+                horizontal=True,
+            )
             message = st.text_area(
-                "Write your feedback in English",
-                placeholder="Today I learned that nanotechnology can...",
-                height=155,
+                "✍️ Write your feedback in English",
+                placeholder="Today I learned that nanotechnology can help doctors...",
+                height=145,
                 max_chars=300,
             )
-            submitted = st.form_submit_button("🚀 Send feedback", use_container_width=True)
+            submitted = st.form_submit_button("🚀 Send to the wall", type="primary", use_container_width=True)
         if submitted:
-            if message.strip():
-                save_feedback(message.strip())
-                st.success("Your feedback is on the screen! Thank you. ✨")
-                st.balloons()
+            if not student_name.strip():
+                st.warning("👩‍🎓 Please write your name first!")
+            elif not message.strip():
+                st.warning("✍️ Write a short sentence first, please!")
             else:
-                st.warning("Please write a short message first.")
-        st.markdown('<p class="small-note">No name needed · English practice · Your message is shown on the class screen.</p>', unsafe_allow_html=True)
-        st.link_button("↗ View the feedback wall", wall_url, use_container_width=True)
-elif view == "admin":
-    st.markdown('<span class="hero-tag">🧬 NANOWALL · TEACHER</span>', unsafe_allow_html=True)
-    st.title("Панель преподавателя")
-    st.link_button("← Вернуться к экрану отзывов", wall_url)
+                save_feedback(student_name.strip(), message.strip(), reaction)
+                st.success("✨ Sent! Your name and feedback are now on the class wall.")
+                st.balloons()
+        st.markdown(
+            '<p class="nw-input-caption">🧑‍🎓 Your name will appear with your message &nbsp; • &nbsp; '
+            '💬 Visible on the classroom screen &nbsp; • &nbsp; 💙 Be kind</p>',
+            unsafe_allow_html=True,
+        )
+        st.link_button("👀 See the feedback wall", wall_url, use_container_width=True)
+        st.markdown('<p class="nw-footer">Made for curious minds 🔬✨</p>', unsafe_allow_html=True)
 
-    # A password must be set in Streamlit Cloud → App settings → Secrets.
-    # Never store this password in the public GitHub repository.
+elif view == "admin":
+    header("🔐 TEACHER ONLY")
+    st.markdown('<div class="nw-section-title">🛠️ Панель преподавателя</div>', unsafe_allow_html=True)
+    st.markdown('<p class="nw-section-sub">Управление отзывами студентов</p>', unsafe_allow_html=True)
+    st.link_button("⬅️ На экран отзывов", wall_url)
+
     try:
         admin_password = st.secrets.get("ADMIN_PASSWORD")
     except Exception:
         admin_password = None
 
     if not admin_password:
-        st.error("Сначала задай ADMIN_PASSWORD в настройках Secrets на Streamlit Cloud.")
-        st.code('ADMIN_PASSWORD = "сюда_свой_надёжный_пароль"', language="toml")
+        st.error("Установи ADMIN_PASSWORD в Streamlit Cloud → App settings → Secrets.")
+        st.code('ADMIN_PASSWORD = "придумай_свой_пароль"', language="toml")
         st.stop()
 
     if not st.session_state.get("admin_authenticated", False):
         with st.form("admin_login"):
             password_input = st.text_input("Пароль преподавателя", type="password")
-            login_clicked = st.form_submit_button("Войти", type="primary")
+            login_clicked = st.form_submit_button("🔓 Войти", type="primary")
         if login_clicked:
             if hmac.compare_digest(password_input, str(admin_password)):
                 st.session_state["admin_authenticated"] = True
@@ -229,84 +370,125 @@ elif view == "admin":
                 st.error("Неверный пароль")
         st.stop()
 
-    if st.button("🔒 Выйти"):
+    if st.button("🔒 Выйти из панели"):
         st.session_state["admin_authenticated"] = False
         st.rerun()
 
     messages = load_feedback(limit=None)
-    st.metric("Всего отзывов", len(messages))
+    st.metric("💬 Всего отзывов", len(messages))
 
     if messages:
         st.download_button(
-            "⬇️ Скачать все отзывы (CSV)",
+            "📥 Скачать отзывы (CSV)",
             data=export_feedback_csv(messages),
             file_name="nanowall_feedback.csv",
             mime="text/csv",
         )
-
         with st.expander("🗑️ Очистить все отзывы", expanded=False):
-            st.warning("Это удалит все отзывы без возможности восстановления. При необходимости сначала скачай CSV.")
+            st.warning("Все отзывы исчезнут без возможности восстановления. При необходимости сначала скачай CSV.")
             with st.form("confirm_clear_form"):
-                confirmed = st.checkbox("Подтверждаю удаление всех отзывов")
-                clear_clicked = st.form_submit_button("Удалить все отзывы", type="primary")
+                confirmed = st.checkbox("Да, я хочу удалить все сообщения")
+                clear_clicked = st.form_submit_button("🗑️ Удалить всё", type="primary")
                 if clear_clicked:
                     if confirmed:
                         clear_feedback()
                         st.rerun()
                     else:
-                        st.error("Сначала отметь подтверждение")
+                        st.error("Сначала поставь галочку подтверждения")
 
-        st.subheader("Отзывы студентов")
-        for message_id, message in messages:
+        st.markdown("### 📝 Сообщения студентов")
+        for message_id, student_name, message, reaction in messages:
             with st.container(border=True):
                 content_col, button_col = st.columns([5, 1], vertical_alignment="center")
                 with content_col:
-                    st.caption(f"Отзыв #{message_id}")
+                    st.caption(f"{reaction} {student_name} · отзыв #{message_id}")
                     st.write(message)
                 with button_col:
-                    if st.button("Удалить", key=f"delete_{message_id}"):
+                    if st.button("🗑️ Удалить", key=f"delete_{message_id}"):
                         delete_feedback(message_id)
                         st.rerun()
     else:
-        st.info("Пока нет отзывов. Новые сообщения появятся здесь.")
-else:
-    left, right = st.columns([4.7, 1.2], gap="large", vertical_alignment="center")
-    with left:
-        st.markdown('<span class="hero-tag">🧬 ENGLISH CLASS · NANOTECHNOLOGY</span>', unsafe_allow_html=True)
-        st.markdown('<div class="hero-title">Small ideas.<br><span>Big future.</span></div>', unsafe_allow_html=True)
-        st.markdown('<div class="hero-sub">What did you learn about nanotechnology today? Share your thoughts in English.</div>', unsafe_allow_html=True)
-        st.link_button("✍️ Write your feedback", student_url)
-    with right:
-        st.image(make_qr(student_url), width=158)
-        st.caption("📱 Scan to leave feedback")
+        st.info("✨ Пока нет отзывов. После нового занятия они появятся здесь.")
 
-    st.markdown('<div class="dividerline"></div>', unsafe_allow_html=True)
+else:
+    header("🔬 NANOTECHNOLOGY • ENGLISH CLASS")
+    left, right = st.columns([3.4, 1.5], gap="large", vertical_alignment="center")
+    with left:
+        st.markdown('<span class="nw-eyebrow">✦ Welcome to the nano universe</span>', unsafe_allow_html=True)
+        st.markdown('<div class="nw-title">Tiny things.<br><span class="gradient">Big ideas. ✨</span></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="nw-desc">Your thoughts are powerful, even when the science is tiny! '
+            'Share what you learned about <strong style="color:#E6FCF9">nanotechnology</strong> '
+            'and watch our classroom wall come alive. ⚛️</div>',
+            unsafe_allow_html=True,
+        )
+        st.link_button("✍️ Write your reflection →", student_url, type="primary")
+        st.markdown(
+            '<div class="nw-sparks"><span class="nw-spark">🧬 Science</span>'
+            '<span class="nw-spark">💡 Discovery</span>'
+            '<span class="nw-spark">🚀 The future</span>'
+            '<span class="nw-spark">🇬🇧 English</span></div>',
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.markdown(
+            '<div class="nano-scene"><div class="nano-glow"></div><div class="nano-ring"></div>'
+            '<div class="nano-ring r2"></div><div class="nano-ring r3"></div>'
+            '<span class="nano-core">🧬</span><span class="nano-dot d1"></span>'
+            '<span class="nano-dot d2"></span><span class="nano-dot d3"></span></div>'
+            '<div class="nw-orbit-caption">⚛️ Small scale, endless possibilities</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="nw-qr-head">📱 Scan & share</div>', unsafe_allow_html=True)
+        _, qr_col, _ = st.columns([1, 2.4, 1])
+        with qr_col:
+            st.image(make_qr(student_url), use_container_width=True)
+
+    st.markdown('<div class="nw-divider"></div>', unsafe_allow_html=True)
 
     @st.fragment(run_every="2s")
     def show_live_wall():
         messages = load_feedback()
+        total = feedback_count()
         st.markdown(
-            f'<div class="wall-top"><span class="wall-title">Class feedback · {len(messages)} messages</span>'
-            '<span class="live-label"><i class="live-dot"></i> LIVE · Updates automatically</span></div>',
+            '<div class="nw-wall-meta"><div>'
+            '<div class="nw-section-title">💬 Our idea wall</div>'
+            f'<div class="nw-section-sub">{total} thoughts shared by our class ✨</div>'
+            '</div><span class="nw-live"><span class="nw-live-dot"></span> LIVE NOW</span></div>',
             unsafe_allow_html=True,
         )
-        if not messages:
+        if messages:
+            amounts = {reaction: 0 for reaction in REACTIONS}
+            for _, _, _, reaction in messages:
+                if reaction in amounts:
+                    amounts[reaction] += 1
+            stats = "".join(
+                f'<span class="nw-stat">{emoji} {count}</span>'
+                for emoji, count in amounts.items() if count
+            )
+            if stats:
+                st.markdown(f'<div class="nw-stats">{stats}</div>', unsafe_allow_html=True)
+            cards = []
+            for message_id, student_name, message, reaction in messages:
+                safe_name = html.escape(student_name, quote=True)
+                safe_initial = html.escape(student_name[:1].upper() or "?", quote=True)
+                safe_message = html.escape(message, quote=True)
+                safe_reaction = html.escape(reaction if reaction in REACTIONS else "💬")
+                cards.append(
+                    '<article class="nw-card"><div class="nw-card-top">'
+                    f'<span class="nw-student"><span class="nw-student-avatar">{safe_initial}</span>'
+                    f'<span>{safe_name}</span></span>'
+                    f'<span class="nw-reaction">{safe_reaction}</span></div>'
+                    f'<div class="nw-message">{safe_message}</div></article>'
+                )
+            st.markdown(f'<div class="nw-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+        else:
             st.markdown(
-                '<div class="empty-wall"><strong>💭 Your thoughts go here.</strong>'
-                'Scan the QR code and be the first to share!</div>',
+                '<div class="nw-empty"><span class="nw-empty-emoji">💌</span>'
+                '<b>Your ideas belong here!</b>Scan the QR code to leave the first message. 🚀</div>',
                 unsafe_allow_html=True,
             )
-        else:
-            cards = []
-            for message_id, message in messages:
-                safe_text = html.escape(message, quote=True)
-                cards.append(
-                    f'<article class="feedback-card">'
-                    f'<div class="feedback-card-head"><span>Anonymous student</span><b>✦</b></div>'
-                    f'<div class="feedback-text">{safe_text}</div>'
-                    f'</article>'
-                )
-            st.markdown(f'<div class="feedback-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
 
     show_live_wall()
+    st.markdown('<p class="nw-footer">🧬 NanoWall · Every big idea starts small ✨</p>', unsafe_allow_html=True)
 
